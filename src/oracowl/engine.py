@@ -43,6 +43,16 @@ def _rad2deg(rad: float) -> float:
     return rad * 180 / math.pi
 
 
+def _today():
+    """
+    Get the current date at 13:00 UTC
+
+    :return: datetime
+    :rtype: datetime
+    """
+    return datetime.now(tz=utc).replace(hour=13, minute=0, second=0, microsecond=0)
+
+
 def _get_timezone(lat: float, lon: float) -> int:
     """
     Get the timezone offset in seconds for a given latitude and longitude
@@ -135,7 +145,7 @@ def compute_dso(
         observer = ephem.Observer()
         observer.lat = ephem.degrees(lat)
         observer.lon = ephem.degrees(lon)
-        observer.date = dt if dt is not None else datetime.utcnow()
+        observer.date = dt if dt is not None else _today()
 
         time_offset = _get_timezone(lat, lon)
 
@@ -146,12 +156,18 @@ def compute_dso(
         body.compute(observer)
 
         sun = ephem.Sun()
-        sunrise_time = ephem.Date(
-            observer.next_rising(sun).datetime() + timedelta(days=1)
-        )
-        sunset_time = ephem.Date(
-            observer.next_setting(sun).datetime() - timedelta(days=1)
-        )
+        sunrise_time = ephem.Date(observer.next_rising(sun).datetime())
+        sunset_time = ephem.Date(observer.next_setting(sun).datetime())
+
+        if sunrise_time < sunset_time:
+            sunrise_time = ephem.Date(sunrise_time.datetime() + timedelta(days=1))
+
+        if sunset_time > sunrise_time:
+            sunset_time = ephem.Date(sunset_time.datetime() - timedelta(days=1))
+
+        night_duration = (
+            sunrise_time.datetime() - sunset_time.datetime()
+        ).total_seconds()
 
         rising_time = (
             observer.next_rising(body)
@@ -163,6 +179,13 @@ def compute_dso(
             if not body.neverup and not body.circumpolar
             else None
         )
+        if (
+            setting_time is not None
+            and rising_time is not None
+            and setting_time < rising_time
+        ):
+            setting_time = ephem.Date(setting_time.datetime() + timedelta(days=1))
+
         transit_time = observer.next_transit(body) if not body.neverup else None
 
         if not body.neverup:
@@ -214,7 +237,7 @@ def compute_dso(
         elevation_delta = sunrise_altitude_deg - sunset_altitude_deg
 
         is_visible = (
-            visible_total_time > 3600 * 4
+            visible_total_time > 3600 * 3
             and (sunrise_altitude_deg > 20 or sunset_altitude_deg > 20)
             and (elevation_delta > 0 or max_altitude_deg > 40)
         )
@@ -222,8 +245,10 @@ def compute_dso(
         if not is_visible and skip_neverup:
             return None
 
-        sqr_root_magnitude_inverted = 10 - math.sqrt(dso["apparent_magnitude"])
-        oracowl_rank = visible_total_time * sqr_root_magnitude_inverted * max_altitude
+        magnitude_inverted = 14 - dso["apparent_magnitude"]
+        oracowl_rank = (
+            (visible_total_time / night_duration) * magnitude_inverted * max_altitude
+        )
         rising_time = (
             (rising_time.datetime() + timedelta(seconds=time_offset)).strftime("%H:%M")
             if rising_time is not None
@@ -362,7 +387,7 @@ def compute_planet(planet_id: str, lat: float, lon: float, dt: datetime = None) 
         observer = ephem.Observer()
         observer.lat = ephem.degrees(lat)
         observer.lon = ephem.degrees(lon)
-        observer.date = dt if dt is not None else datetime.utcnow()
+        observer.date = dt if dt is not None else _today()
 
         return _compute_planet_with_observer(planet_id, observer)
     except Exception as e:
@@ -413,7 +438,7 @@ def compute_polaris(lat: float, lon: float, dt: datetime = None) -> dict:
         observer = ephem.Observer()
         observer.lat = ephem.degrees(lat)
         observer.lon = ephem.degrees(lon)
-        observer.date = dt if dt is not None else datetime.utcnow()
+        observer.date = dt if dt is not None else datetime.now(tz=utc)
 
         sidereal_time = observer.sidereal_time()
 
@@ -454,9 +479,9 @@ def compute_night(lat: float, lon: float, dt: datetime = None) -> dict:
         dso_list_top_list = sorted(
             dso_list,
             key=lambda x: (
-                30 - x["apparent_magnitude"]
+                14 - x["apparent_magnitude"]
                 if x["apparent_magnitude"] is not None
-                else 0
+                else -100
             ),
             reverse=True,
         )[:100]
